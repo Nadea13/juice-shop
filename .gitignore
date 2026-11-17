@@ -64,6 +64,7 @@ config/*.yml
 !config/tutorial.yml
 !config/oss.yml
 !config/defcon33.yml
+!evidence/logs/
 
 # System Files
 .DS_Store

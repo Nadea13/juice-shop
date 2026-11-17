@@ -1,0 +1,85 @@
+name: snyk-security-scan 
+
+on:                                    # 1) SCM trigger
+  push: 
+    branches: [ master ] 
+  pull_request: 
+    branches: [ master ] 
+
+permissions: 
+  contents: read                       
+
+env: 
+  SNYK_VERSION: 1.1308.4               # pin an exact CLI version (no latest)
+
+jobs:  
+  snyk-scan:                           # 2) Trigger Scan -> 3) Runner    
+    runs-on: ubuntu-24.04    
+    env:      
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}   # CI secret - never commit    
+    steps:      
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262         # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020       # v4.4.0 
+        with: { node-version: "22" }      
+      
+      - name: Install Snyk CLI (pinned)        
+        run: npm install -g "snyk@${SNYK_VERSION}"        
+
+      - name: Snyk Code (SAST)  
+        id: snyk-code      
+        run: |
+          mkdir -p results
+          CODE_EXIT=0
+          snyk code test --sarif-file-output=results/snyk-code.sarif || CODE_EXIT=$?
+          echo "exit_code=${CODE_EXIT}" >> $GITHUB_OUTPUT
+          echo "Snyk Code finished with exit code: $CODE_EXIT" 
+
+      - name: Install dependencies for SCA (ignore lifecycle scripts)       
+        run: npm install --ignore-scripts
+
+      - name: Snyk Open Source (SCA)        
+        id: snyk-sca
+        run: |
+          mkdir -p results
+          SCA_EXIT=0
+          snyk test --json-file-output=results/snyk-sca.json || SCA_EXIT=$?
+          echo "exit_code=${SCA_EXIT}" >> $GITHUB_OUTPUT
+          echo "Snyk Open Source finished with exit code: $SCA_EXIT"
+
+      - name: Upload results            # 4) Result        
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02    # v4.6.2
+        with:          
+          name: snyk-results          
+          path: results/                        
+          if-no-files-found: warn
+
+      - name: Quality Gate
+        if: always()
+        run: |
+          CODE_EXIT="${{ steps.snyk-code.outputs.exit_code }}"
+          SCA_EXIT="${{ steps.snyk-sca.outputs.exit_code }}"
+
+          if [[ "$CODE_EXIT" != "0" && "$CODE_EXIT" != "1" ]] || [[ "$SCA_EXIT" != "0" && "$SCA_EXIT" != "1" ]]; then
+            echo "::error::Scanner execution failed (Snyk Code exit=$CODE_EXIT, Snyk SCA exit=$SCA_EXIT)"
+            exit 1
+          fi
+
+          SAST_HIGH=$(jq '[.runs[].results[] | select(.level == "error")] | length' results/snyk-code.sarif 2>/dev/null || echo 0)
+          SCA_CRIT=$(jq '[.vulnerabilities[]? | select(.severity == "critical")] | length' results/snyk-sca.json 2>/dev/null || echo 0)
+          SCA_HIGH=$(jq '[.vulnerabilities[]? | select(.severity == "high")] | length' results/snyk-sca.json 2>/dev/null || echo 0)
+
+          TOTAL_HIGH_CRIT=$((SAST_HIGH + SCA_CRIT + SCA_HIGH))
+
+          echo "=== Scan Summary ==="
+          echo "Snyk Code (High/error): $SAST_HIGH"
+          echo "snyk SCA Critical: $SCA_CRIT"
+          echo "snyk SCA High: $SCA_HIGH"
+          echo "Total High/Critical blocking findings: $TOTAL_HIGH_CRIT"
+
+          if [ "$TOTAL_HIGH_CRIT" -gt 0 ]; then
+            echo "::error::Quality Gate FAILED: Found ${TOTAL_HIGH_CRIT} High/Critical findings."
+            exit 1
+          fi
+
+          echo "Quality Gate PASSED: No High or Critical findings."
